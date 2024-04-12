@@ -1,0 +1,112 @@
+name: Deploy to ECR
+
+on:
+  push:
+    branches: [prod]
+
+jobs:
+  build:
+    name: Build Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: us-east-1
+
+      - name: Build and push DB image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY_DB: assigment-dev-mysql
+          IMAGE_TAG_DB: v5.0
+        run: |
+          ls -ltra
+          cd docker
+          # Docker build
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_DB:$IMAGE_TAG_DB -f Dockerfile_mysql . 
+          
+          # Unit test
+          docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=pw $ECR_REGISTRY/$ECR_REPOSITORY_DB:$IMAGE_TAG_DB
+          docker ps
+          
+          echo "Pause for 10 seconds to let container start"
+          sleep 10
+          
+          docker exec mysql mysql -ppw -e "show databases;"
+          
+          # Docker push
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_DB:$IMAGE_TAG_DB
+      - name: Build, test, tag, and push app image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY_APP: assigment-dev-app
+          IMAGE_TAG_APP: v3.0
+          DBHOST: ${{ secrets.DBHOST }}
+          DBPORT: ${{ secrets.DBPORT }}
+          DBUSER: ${{ secrets.DBUSER }}
+          DBPWD: ${{ secrets.DBPWD }}
+          BACKGROUND_IMAGE: 'https://your-bucket-name.s3.amazonaws.com/path/to/image.jpg'
+        run: |
+          cd docker
+          
+          # Set variables
+          export DBHOST=172.17.0.2
+          export DBPORT=3306
+          export DBUSER=root
+          export DATABASE=employees
+          export DBPWD=pw
+          export BACKGROUND_IMAGE=https://finalbrojectmoishtor.s3.amazonaws.com/wallpaperflare.com_wallpaper.jpg
+          
+          # Docker build for app image
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_APP:$IMAGE_TAG_APP -f Dockerfile \
+          --build-arg DBHOST=$DBHOST \
+          --build-arg DBPORT=$DBPORT \
+          --build-arg DBUSER=$DBUSER \
+          --build-arg DBPWD=$DBPWD \
+          --build-arg AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+          --build-arg AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+          --build-arg AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
+          --build-arg S3_BUCKET_URL=$S3_BUCKET_URL .
+          
+      - name: Run Docker container
+        run: |
+          docker run -d -p 8080:81 --name app $ECR_REGISTRY/$ECR_REPOSITORY_APP:$IMAGE_TAG_APP
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY_APP: assigment-dev-app
+          IMAGE_TAG_APP: v3.0
+          DBHOST: ${{ secrets.DBHOST }}
+          DBPORT: ${{ secrets.DBPORT }}
+          DBUSER: ${{ secrets.DBUSER }}
+          DBPWD: ${{ secrets.DBPWD }}
+          BACKGROUND_IMAGE: ${{ secrets.BACKGROUND_IMAGE }}
+    
+      - name: Check App Health
+        id: check_health
+        run: |
+          echo "Waiting for the app to be ready..."
+          sleep 10  # Adjust this based on the expected startup time of your application
+          STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+          echo "App responded with status code: $STATUS_CODE"
+          if [ "$STATUS_CODE" -eq 200 ]; then
+            echo "::set-output name=healthy::true"
+          else
+            echo "::set-output name=healthy::false"
+          fi
+      - name: Push Docker image to ECR
+        if: steps.check_health.outputs.healthy == 'true'
+        run: |
+          echo "App is healthy, proceeding with Docker push..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_APP:$IMAGE_TAG_APP
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY_APP: assigment-dev-app
+          IMAGE_TAG_APP: v3.0
